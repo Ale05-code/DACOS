@@ -9,5 +9,3 @@ test.img
 *.swp
 .DS_Store
 
-# Local Claude Code settings (if ever created in this folder)
-.claude/
