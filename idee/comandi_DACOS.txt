@@ -1,0 +1,59 @@
+LS (List Directory Contents)
+
+Cosa fa: Elenca i file e le cartelle presenti nella directory corrente.
+
+Come si implementa nel tuo OS: Legge i settori della directory corrente dal file system (es. FAT12) e stampa i nomi dei file formattati a schermo.
+
+CD (Change Directory)
+
+Cosa fa: Ti permette di spostarti tra le cartelle.
+
+Come si implementa nel tuo OS: Aggiorna una variabile globale o una struttura nel kernel che tiene traccia della cartella o del cluster corrente in cui ti trovi.
+
+MKDIR (Make Directory)
+
+Cosa fa: Crea una nuova cartella vuota.
+
+Come si implementa nel tuo OS: Trova un cluster libero sul disco, alloca una nuova voce di directory con l'attributo "cartella" e aggiorna le tabelle del file system.
+
+TOUCH / CREATE
+
+Cosa fa: Crea un file vuoto.
+
+Come si implementa nel tuo OS: Simile a mkdir, ma crea una voce di file con dimensione zero e aggiorna il file system.
+
+CAT / TYPE
+
+Cosa fa: Legge il contenuto di un file di testo e lo stampa a schermo.
+
+Come si implementa nel tuo OS: Cerca il file, individua i cluster in cui sono salvati i dati sul disco, li legge sequenzialmente in memoria e spara i caratteri a video.
+
+RM / DELETE
+
+Cosa fa: Cancella un file o una cartella.
+
+Come si implementa nel tuo OS: Segna i cluster occupati dal file come liberi nella tabella del file system e rimuove la voce corrispondente dalla directory.
+
+TREE
+
+Cosa fa: Mostra la struttura di cartelle e file sotto forma di albero grafico testuale.
+
+Come si implementa nel tuo OS: Una funzione ricorsiva che esplora le cartelle figlie leggendo il file system e stampa caratteri come |-- o \-- per disegnare i rami.
+
+CLEAR
+
+Cosa fa: Pulisce lo schermo del terminale.
+
+Come si implementa nel tuo OS: Reinizializza il buffer video o scrive spazi vuoti su tutte le righe e riporta il cursore in alto a sinistra.
+
+HELP
+
+Cosa fa: Mostra la lista di tutti i comandi disponibili nel tuo OS.
+
+Come si implementa nel tuo OS: Un semplice printf o una serie di stampe testuali statiche che elencano i comandi che hai programmato.
+
+REBOOT / SHUTDOWN
+
+Cosa fa: Riavvia o spegne il computer.
+
+Come si implementa nel tuo OS: Invia un comando diretto alla CPU tramite le porte di I/O o sfrutta l'ACPI (nei sistemi più avanzati) per staccare la corrente.

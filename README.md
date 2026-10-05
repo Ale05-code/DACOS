@@ -1,139 +1,111 @@
 # DACOS
 
-A tiny x86 operating system built from scratch in real-mode 16-bit assembly, started from the [x86 OS Development playlist](https://www.youtube.com/playlist?list=PLFjM7v6KGMpiH2G-kT781ByCNC_0pKpPN) on YouTube and then personalized and extended beyond it.
+Sistema operativo didattico con una **shell interattiva in stile Linux** (ls, cd, mkdir, touch, cat,
+rm, mv, cp, tree, un editor di testo, neofetch e altro), file salvati davvero sul disco (FAT32) e
+tastiera italiana. Basato su [nanobyte_os](https://github.com/nanobyte-dev/nanobyte_os)
+(branch `videos/part11`), con varie personalizzazioni.
 
-This is a learning project: the goal is to understand, at the lowest possible level, how a PC boots and how an operating system takes control of the hardware - starting from a BIOS boot sector and building up from there. The playlist is used as a foundation, not a script to copy verbatim - features, structure, and code are being adapted and extended with original work as the project grows.
+- **[RELAZIONE.md](RELAZIONE.md)**: come si usa, i comandi fatti e quelli da fare, ogni file spiegato, test, bug corretti
+- **[theory/](theory/README.md)**: la teoria, capitolo per capitolo
 
-## What it does so far
+Avvio rapido (con il cross-compiler in `../.toolchains`):
 
-- **Boot sector (`src/bootloader/boot.asm`)** - a 512-byte x86 boot sector with a valid FAT12 BIOS Parameter Block (BPB), assembled to run at the classic real-mode load address `0x7C00`.
-- **Disk read via BIOS interrupts** - the bootloader calls `INT 13h` (function `02h`) to read raw sectors from the boot floppy, with:
-  - LBA → CHS address translation (`lba_to_chs`)
-  - a retry loop (up to 3 attempts) with disk controller reset on failure (`disk_reset`)
-  - a boot-halt error path if all retries fail
-- **FAT12 floppy image** - the build produces a 1.44 MB floppy image (`main_floppy.img`), formatted as FAT12, containing the boot sector and a separate `kernel.bin` file copied onto the filesystem.
-- **Minimal kernel stub (`src/kernel/main.asm`)** - currently a placeholder; it is written to the disk image but not yet loaded/executed by the bootloader (that's the next step in the series).
-
-Everything runs in 16-bit real mode - no protected mode, no paging, no C code yet. Just the CPU, the BIOS, and raw assembly.
-
-## How it's implemented
-
-| Piece | Details |
-|---|---|
-| Architecture | x86 (16-bit real mode) |
-| Assembler | [NASM](https://www.nasm.us/) |
-| Disk format | FAT12, 3.5" 1.44 MB floppy image |
-| Build system | GNU Make |
-| Emulation | QEMU (`qemu-system-i386`) |
-| Debugging | Bochs (with the Bochs Enhanced Debugger GUI) and QEMU + GDB remote stub |
-
-The boot sector is assembled directly to a flat binary with `org 0x7C00`, since that's the physical memory address the BIOS loads and jumps to after POST. The disk image is built by writing the compiled boot sector to sector 0 with `dd`, formatting the image as FAT12 with `mkfs.fat`, and copying the kernel binary onto the resulting filesystem with `mcopy` (from `mtools`) - without ever mounting the image on the host.
-
-## Project structure
-
+```sh
+scons run          # compila, crea build/i686_debug/image.img e avvia in QEMU
+scons savefiles    # prima di ricompilare: salva in image/root/ i file creati dentro DACOS
 ```
-DACOS/
-├── src/
-│   ├── bootloader/
-│   │   └── boot.asm        # boot sector: BPB, disk I/O, LBA/CHS conversion
-│   └── kernel/
-│       └── main.asm        # kernel stub (not yet loaded by the bootloader)
-├── build/                  # generated: bootloader.bin, kernel.bin, main_floppy.img
-├── theory/                 # personal notes taken while following the series
-├── Makefile
-├── run.sh                  # boots the built image in QEMU
-├── debug.sh                # boots the built image in Bochs (GUI debugger)
-├── bochs_config            # Bochs machine configuration
-└── bx_enh_dbg.ini          # Bochs Enhanced Debugger UI settings
-```
+
+> Le istruzioni originali di nanobyte qui sotto parlano di `guestfs` e del modulo Python `sh`: in
+> questa versione il default è `mountMethod = 'mtools'` (niente sudo) e `sh` non serve più.
+
+---
+
+# nanobyte_os
+This repository contains the code from the ["Building an OS"](https://www.youtube.com/watch?v=9t-SPC7Tczc&list=PLFjM7v6KGMpiH2G-kT781ByCNC_0pKpPN) series on the ["Nanobyte"](https://www.youtube.com/channel/UCSPIuWADJIMIf9Erf--XAsA) YouTube channel.
+
+
+This branch contains the code as written in [Part 11 - Memory detection](https://www.youtube.com/watch?v=xp-yB9WBadI), with some minor bug fixes:
+
+* fixed bochs configuration
+* fixed `missing ../.toolchains directory` error when building toolchain
+* fixed error related to PREFIX when building toolchain
+* added support for "mount" method (in addition to libguestfs)
 
 ## Prerequisites
 
-Tested on Ubuntu/Debian. You'll need:
+The project requires a Unix-like environment. If you are using Windows, there are various ways of setting one up (WSL, a Linux virtual machine, Cygwin, MSYS2). I recommend using WSL, which is the [easiest to setup](https://learn.microsoft.com/en-us/windows/wsl/install).
 
-- `make`
-- `nasm` - the assembler
-- `qemu-system-x86` - to run the OS in emulation
-- `dosfstools` - provides `mkfs.fat`, used to format the floppy image
-- `mtools` - provides `mcopy`, used to copy files onto the FAT12 image without mounting it
-- `bochs` (optional) - an alternative emulator with a much better low-level debugger, used for step-by-step CPU/register inspection
+For Part 11, you need the following tools:
 
-Install everything with:
+* `scons`
+* `nasm`
+* `mtools`
+* dependencies to build a GCC cross compiler (see the section below)
+* `qemu-system-x86` for testing
+* `bochs-x bochsbios vgabios` for debugging
+* your preferred text editor
 
-```bash
-sudo apt update
-sudo apt install make nasm qemu-system-x86 dosfstools mtools bochs bochs-sdl bochsbios vgabios
+A major change in Part 11 was the move from `make` to `scons`. Most of the build scripts are now written in Python. Check the "Building" section if you are coming from Part 10, there are some new dependencies.
+
+## Building
+
+1. Install dependencies:
+
+```sh
+# Ubuntu, Debian:
+sudo apt install build-essential bison flex libgmp3-dev libmpc-dev libmpfr-dev texinfo wget \
+                   nasm mtools python3 python3-pip python3-parted scons dosfstools libguestfs-tools qemu-system-x86
+
+# Fedora:
+sudo dnf install gcc gcc-c++ make bison flex gmp-devel libmpc-devel mpfr-devel texinfo wget \
+                   nasm mtools python3 python3-pip python3-pyparted python3-scons dosfstools guestfs-tools qemu-system-x86
+
+# Arch & Arch-based:
+paru -S gcc make bison flex libgmp-static libmpc mpfr texinfo nasm mtools qemu-system-x86 python3 scons
 ```
+NOTE: to install all the required packages on Arch, you need an [AUR helper](https://wiki.archlinux.org/title/AUR_helpers).
 
-Any text editor works - the original notes for this project were written using [micro](https://micro-editor.github.io/):
+2. Install python packages: `python3 -m pip install -r requirements.txt`
 
-```bash
-sudo snap install micro --classic
-```
+3. Check the `build_scripts/config.py` configuration file. The `toolchain` variable specifies where the toolchain will be downloaded and installed. The default path is `../.toolchains`, which is in the parent directory to where you cloned the repo.
 
-## Building and running
+Coming from Part 10, you might want to reuse the old toolchain you have already built. Simply change the path `toolchain` variable to point to the correct directory.
 
-Clone the repo, then from the project root:
+Another important variable is `mountMethod`. See the section below for details.
 
-```bash
-# Build the bootloader, kernel, and floppy image
-make
+4. Run `scons toolchain`, this should download and build the required tools (binutils and GCC). If you encounter errors during this step, you might have to modify `build_scripts/config.mk` and try a different version of **binutils** and **gcc**. Using the same version as the one bundled with your distribution is your best bet.
 
-# Boot the image in QEMU
-./run.sh
-```
+5. Run `scons`. Type your sudo password when prompted, this is required for running `losetup`, `mount`, `umount`.
 
-If everything worked, a QEMU window opens, the BIOS briefly tries (and fails) to boot from a hard disk - which is expected, since no hard disk is attached - falls back to the floppy, and prints `Hello world!` to the screen. That message is only printed *after* a successful `INT 13h` disk read, so seeing it confirms the bootloader actually read real data off the emulated floppy disk rather than running purely static code.
+### Mount methods
 
-To rebuild from a clean state:
+There are 2 supported mount methods that can be configured in `build_scripts/config.py` with the `mountMethod` variable:
 
-```bash
-make clean
-make
-```
+* `guestfs` uses the `guestmount` command, and it doesn't require sudo access. This is the preferred method, however in some distributions (most notably WSL) it isn't working properly.
 
-### Debugging
+* `mount` is provided as a backup when `guestfs` fails. The disadvantage is that it requires typing your password every time you rebuild the disk image.
 
-**Bochs** (recommended for beginners - has a built-in GUI debugger with register/memory views):
+### Warning
 
-```bash
-./debug.sh
-```
+** DO NOT use `sudo` to run the build**. This will mess up file permissions for all the files in the `build` directory, and has the potential of damaging your system. The build script will request elevated privileges only when performing the mount operations.
 
-**QEMU + GDB** (for scriptable, breakpoint-driven debugging):
+## Running
 
-```bash
-qemu-system-i386 -drive file=build/main_floppy.img,format=raw,if=floppy -s -S
-```
+* run `scons run` to test your OS using qemu.
 
-`-S` pauses the CPU on startup and `-s` opens a GDB remote stub on port `1234`. In another terminal:
+## Debugging with qemu and GDB
 
-```bash
-gdb
-(gdb) target remote localhost:1234
-(gdb) break *0x7C00      # entry point of the boot sector
-(gdb) continue
-```
+* run `scons debug`.
 
-From there you can single-step, inspect registers (`info registers`), and dump memory (e.g. `x/16xb 0x7e00`) to watch the disk read happen instruction by instruction. Note that exact breakpoint addresses inside `boot.asm` shift whenever the source changes - re-disassemble the freshly built binary to find them again:
+## Debugging with bochs
 
-```bash
-ndisasm -b16 -o0x7C00 build/bootloader.bin
-```
+* run `scons bochs`.
 
-## Roadmap
+**Troubleshooting**: Bochs has proven to be pretty unreliable. Check [this article](https://github.com/nanobyte-dev/nanobyte_os/wiki/Frequent-issues#bochs-doesnt-work) for some troubleshooting tips.
 
-Following along with the playlist, next steps are expected to include:
 
-- [ ] Parsing the FAT12 directory structure to actually locate and load `kernel.bin` by name (rather than a fixed sector)
-- [ ] Switching from 16-bit real mode to 32-bit protected mode
-- [ ] A minimal C kernel entry point
-- [ ] Basic drivers (screen, keyboard)
+## Links
 
-## Credits
-
-This project is based on the [x86 OS Development YouTube playlist](https://www.youtube.com/playlist?list=PLFjM7v6KGMpiH2G-kT781ByCNC_0pKpPN), used as the starting point and learning foundation. All code in this repo was written by hand alongside the videos, with personal notes kept in [`theory/`](./theory), and is being progressively customized and extended beyond what the series covers as the project evolves.
-
-## License
-
-This is an educational project, released under the [MIT License](./LICENSE) - free to use, study, and build on for learning purposes.
+* [YouTube](https://www.youtube.com/channel/UCSPIuWADJIMIf9Erf--XAsA)
+* [Discord channel](https://discord.gg/RgHc5XrCEw)
+* [Patreon](https://www.patreon.com/nanobyte)

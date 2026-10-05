@@ -1,0 +1,11 @@
+from SCons.Environment import Environment
+
+Import('TARGET_ENVIRONMENT')
+TARGET_ENVIRONMENT: Environment
+
+env = TARGET_ENVIRONMENT.Clone()
+
+# the MBR is a flat 440-byte binary: no linking needed
+mbr = env.Command('mbr.bin', 'mbr.asm', 'nasm -f bin -o $TARGET $SOURCE')
+
+Export('mbr')

@@ -1,0 +1,335 @@
+import os
+import re
+import subprocess
+import time
+from io import SEEK_CUR, SEEK_SET
+from pathlib import Path
+from shutil import copy2
+import parted
+
+from SCons.Action import Action
+from SCons.Environment import Environment
+
+from build_scripts.utility import GlobRecursive
+
+Import('mbr')
+Import('stage1')
+Import('stage2')
+Import('kernel')
+
+Import('TARGET_ENVIRONMENT')
+TARGET_ENVIRONMENT: Environment
+env:Environment = TARGET_ENVIRONMENT
+
+SECTOR_SIZE = 512
+
+# mtools controlla che la geometria del BPB sia "da floppy": su un'immagine
+# partizionata il controllo fallisce senza motivo, quindi lo disattiviamo
+MTOOLS_ENV = dict(os.environ, MTOOLS_SKIP_CHECK='1')
+
+
+def run(*args, **kwargs):
+    """Esegue un comando e interrompe la build se fallisce."""
+    subprocess.run([str(a) for a in args], check=True, **kwargs)
+
+
+def generate_image_file(target: str, size_sectors: int):
+    # truncate crea un file "sparse" pieno di zeri senza allocare tutto in RAM
+    with open(target, 'wb') as fout:
+        fout.truncate(size_sectors * SECTOR_SIZE)
+
+
+def create_filesystem(target: str, filesystem, reserved_sectors=0, offset=0):
+    if filesystem not in ['fat12', 'fat16', 'fat32']:
+        raise ValueError('Unsupported filesystem ' + filesystem)
+
+    reserved_sectors += 1
+    if filesystem == 'fat32':
+        # FAT32 wants the FSInfo sector (1) and a backup of the boot sector (6):
+        # 32 reserved sectors is the standard value
+        reserved_sectors = max(reserved_sectors + 1, 32)
+
+    run('mkfs.fat', target,
+        '-F', filesystem[3:],               # fat size
+        '-n', 'DACOS',                       # label
+        '-R', reserved_sectors,             # reserved sectors
+        '--offset', offset,
+        stdout=subprocess.DEVNULL)
+
+
+def find_symbol_in_map_file(map_file: Path, symbol: str):
+    with map_file.open('r') as fmap:
+        for line in fmap:
+            if symbol in line:
+                match = re.search('0x([0-9a-fA-F]+)', line)
+                if match is not None:
+                    return int(match.group(1), base=16)
+    return None
+
+
+def install_stage1(target: str, stage1: str, stage2_offset, stage2_size, offset=0):
+    # find stage1 map file
+    map_file = Path(stage1).with_suffix('.map')
+    if not map_file.exists():
+        raise ValueError("Can't find " + str(map_file))
+
+    entry_offset = find_symbol_in_map_file(map_file, '__entry_start')
+    if entry_offset is None:
+        raise ValueError("Can't find __entry_start symbol in map file " + str(map_file))
+    entry_offset -= 0x7c00
+
+    stage2_start = find_symbol_in_map_file(map_file, 'stage2_location')
+    if stage2_start is None:
+        raise ValueError("Can't find stage2_location symbol in map file " + str(map_file))
+    stage2_start -= 0x7c00
+
+    if stage2_size > 255:
+        raise ValueError(f"stage2 is too big ({stage2_size} sectors, max 255)")
+
+    with open(stage1, 'rb') as fstage1:
+        with os.fdopen(os.open(target, os.O_WRONLY | os.O_CREAT), 'wb+') as ftarget:
+            ftarget.seek(offset * SECTOR_SIZE, SEEK_SET)
+
+            # write first 3 bytes jump instruction
+            ftarget.write(fstage1.read(3))
+
+            # write starting at entry_offset (end of header)
+            fstage1.seek(entry_offset - 3, SEEK_CUR)
+            ftarget.seek(entry_offset - 3, SEEK_CUR)
+            ftarget.write(fstage1.read())
+
+            # write location of stage2
+            ftarget.seek(offset * SECTOR_SIZE + stage2_start, SEEK_SET)
+            ftarget.write(stage2_offset.to_bytes(4, byteorder='little'))
+            ftarget.write(stage2_size.to_bytes(1, byteorder='little'))
+
+
+def copy_boot_sector_to_backup(target: str, offset: int):
+    """FAT32 keeps a backup copy of the boot sector (usually in sector 6):
+    it must be identical to the real one, stage1 included."""
+    with open(target, 'r+b') as f:
+        f.seek(offset * SECTOR_SIZE)
+        boot = f.read(SECTOR_SIZE)
+        backup = int.from_bytes(boot[50:52], 'little')      # BPB: backup boot sector
+        if boot[82:87] != b'FAT32' or backup == 0 or backup == 0xFFFF:
+            return
+        f.seek((offset + backup) * SECTOR_SIZE)
+        f.write(boot)
+
+
+def install_mbr(target: str, mbr: str):
+    # only the boot code (440 bytes): the disk signature, the partition
+    # table and the 0xAA55 signature written by parted must be preserved
+    with open(mbr, 'rb') as fmbr:
+        code = fmbr.read()
+    if len(code) > 440:
+        raise ValueError("MBR code is too big")
+
+    with os.fdopen(os.open(target, os.O_WRONLY | os.O_CREAT), 'wb+') as ftarget:
+        ftarget.seek(0, SEEK_SET)
+        ftarget.write(code)
+
+
+def install_stage2(target: str, stage2: str, offset=0, limit=None):
+    with open(stage2, 'rb') as fstage2:
+        data = fstage2.read()
+
+    if limit is not None and offset * SECTOR_SIZE + len(data) > limit * SECTOR_SIZE:
+        raise ValueError("stage2 doesn't fit before the first partition")
+
+    with os.fdopen(os.open(target, os.O_WRONLY | os.O_CREAT), 'wb+') as ftarget:
+        ftarget.seek(offset * SECTOR_SIZE, SEEK_SET)
+        ftarget.write(data)
+
+
+def copy_files_mtools(image_spec: str, kernel: str, files, src_root: str):
+    """Copia kernel e file di image/root nel file system FAT con mtools (senza montare)."""
+    print('    ... copying', kernel)
+    run('mmd', '-i', image_spec, '::boot', env=MTOOLS_ENV)
+    run('mcopy', '-i', image_spec, kernel, '::boot/', env=MTOOLS_ENV)
+
+    for file in files:
+        file_src = file.srcnode().path
+        file_rel = os.path.relpath(file_src, src_root)
+        file_dst = '::' + file_rel
+
+        if os.path.isdir(file_src):
+            print('    ... creating directory', file_rel)
+            run('mmd', '-i', image_spec, file_dst, env=MTOOLS_ENV)
+        else:
+            print('    ... copying', file_rel)
+            run('mcopy', '-i', image_spec, file_src, file_dst, env=MTOOLS_ENV)
+
+
+def copy_files_mounted(mount_dir: str, kernel: str, files, src_root: str):
+    """Copia kernel e file di image/root in un file system montato."""
+    print('    ... copying', kernel)
+    bootdir = os.path.join(mount_dir, 'boot')
+    os.makedirs(bootdir)
+    copy2(kernel, bootdir)
+
+    for file in files:
+        file_src = file.srcnode().path
+        file_rel = os.path.relpath(file_src, src_root)
+        file_dst = os.path.join(mount_dir, file_rel)
+
+        if os.path.isdir(file_src):
+            print('    ... creating directory', file_rel)
+            os.makedirs(file_dst, exist_ok=True)
+        else:
+            print('    ... copying', file_rel)
+            copy2(file_src, file_dst)
+
+
+def build_floppy(image, mbr, stage1, stage2, kernel, files, env):
+    size_sectors = 2880
+    stage2_size = os.stat(stage2).st_size
+    stage2_sectors = (stage2_size + SECTOR_SIZE - 1) // SECTOR_SIZE
+
+    generate_image_file(image, size_sectors)
+
+    print(f"> formatting file using fat12...")
+    create_filesystem(image, 'fat12', stage2_sectors)
+
+    print(f"> installing stage1...")
+    install_stage1(image, stage1, stage2_offset=1, stage2_size=stage2_sectors)
+
+    print(f"> installing stage2...")
+    install_stage2(image, stage2, offset=1)
+
+    print(f"> copying files...")
+    copy_files_mtools(image, kernel, files, env['BASEDIR'])
+
+
+def create_partition_table(target: str, align_start: int, file_system: str):
+    device = parted.getDevice(target)
+    disk = parted.freshDisk(device, 'msdos')
+    freeSpace = disk.getFreeSpaceRegions()
+    partitionGeometry = parted.Geometry(device, align_start, end=freeSpace[-1].end)
+    # the file system type only sets the partition type byte (e.g. 0x0C = FAT32 LBA)
+    fs = parted.FileSystem(type=file_system, geometry=partitionGeometry)
+    partition = parted.Partition(disk=disk, type=parted.PARTITION_NORMAL, fs=fs, geometry=partitionGeometry)
+    partition.setFlag(parted.PARTITION_BOOT)
+    disk.addPartition(partition, constraint=device.optimalAlignedConstraint)
+    disk.commit()
+
+
+def mount_fs(image: str, mount_dir: str, mount_method: str):
+    if mount_method == 'guestfs':
+        run('guestmount', '-a', image, '-m', '/dev/sda1', mount_dir)
+        return None
+
+    elif mount_method == 'mount':
+        # sudo chiede da solo la password sul terminale
+        out = subprocess.run(['sudo', 'losetup', '--partscan', '--find', '--show', image],
+                             check=True, capture_output=True, text=True).stdout
+        loop_device = out.strip()
+        run('sudo', 'mount', loop_device + 'p1', mount_dir, '-o', f'uid={os.getuid()},sync')
+        return loop_device
+
+    raise ValueError("Unknown mount method - " + mount_method)
+
+
+def unmount_fs(mount_dir: str, mount_method, mount_token):
+    time.sleep(1)
+    if mount_method == 'guestfs':
+        run('fusermount', '-u', mount_dir)
+    else:
+        run('sudo', 'umount', mount_dir)
+        run('sudo', 'losetup', '-d', mount_token)
+
+
+def build_disk(image, mbr, stage1, stage2, kernel, files, env):
+    size_sectors = (env['imageSize'] + SECTOR_SIZE - 1) // SECTOR_SIZE
+    file_system = env['imageFS']
+    mount_method = env['mountMethod']
+    partition_offset = 2048
+
+    stage2_size = os.stat(stage2).st_size
+    stage2_sectors = (stage2_size + SECTOR_SIZE - 1) // SECTOR_SIZE
+
+    generate_image_file(image, size_sectors)
+
+    # create partition table
+    print(f"> creating partition table...")
+    create_partition_table(image, partition_offset, file_system)
+
+    # install our MBR (libparted's generic one can only use CHS addressing)
+    print(f"> installing MBR...")
+    install_mbr(image, mbr)
+
+    # create file system
+    print(f"> formatting file using {file_system}...")
+    create_filesystem(image, file_system, offset=partition_offset)
+
+    # install stage1
+    print(f"> installing stage1...")
+    install_stage1(image, stage1, offset=partition_offset, stage2_offset=1, stage2_size=stage2_sectors)
+    copy_boot_sector_to_backup(image, partition_offset)
+
+    # install stage2
+    print(f"> installing stage2...")
+    install_stage2(image, stage2, offset=1, limit=partition_offset)
+
+    src_root = env['BASEDIR']
+
+    if mount_method == 'mtools':
+        # mtools accetta "immagine@@offset_in_byte" per lavorare dentro una partizione
+        print(f"> copying files...")
+        copy_files_mtools(f'{image}@@{partition_offset * SECTOR_SIZE}', kernel, files, src_root)
+        return
+
+    tempdir = os.path.join('/tmp', 'tmp_mount_{0}'.format(int(time.time())))
+    os.mkdir(tempdir)
+    mount_token = None
+    mounted = False
+    try:
+        print(f"> mounting image to {tempdir}...")
+        mount_token = mount_fs(image, tempdir, mount_method)
+        mounted = True
+
+        print(f"> copying files...")
+        copy_files_mounted(tempdir, kernel, files, src_root)
+
+    finally:
+        print("> cleaning up...")
+        if mounted:
+            for tries in range(5):
+                try:
+                    unmount_fs(tempdir, mount_method, mount_token)
+                    break
+                except Exception as ex:
+                    print('    ... attempt', tries, 'to unmount failed:', ex)
+                    time.sleep(5)
+        os.rmdir(tempdir)
+
+
+def build_image(target, source, env):
+    mbr = str(source[0])
+    stage1 = str(source[1])
+    stage2 = str(source[2])
+    kernel = str(source[3])
+    files = source[4:]
+
+    image = str(target[0])
+    if env['imageType'] == 'floppy':
+        build_floppy(image, mbr, stage1, stage2, kernel, files, env)
+    elif env['imageType'] == 'disk':
+        build_disk(image, mbr, stage1, stage2, kernel, files, env)
+    else:
+        raise ValueError('Unknown image type ' + env['imageType'])
+
+
+# Setup image target
+root = env.Dir('root')
+root_content = GlobRecursive(env, '*', root)
+inputs = [mbr, stage1, stage2, kernel] + root_content
+
+output = 'image.img'
+
+image = env.Command(output, inputs,
+                    action=Action(build_image, 'Creating disk image...'),
+                    BASEDIR=root.srcnode().path)
+env.Depends(image, inputs)
+
+Export('image')
