@@ -35,7 +35,7 @@ This branch contains the code as written in [Part 11 - Memory detection](https:/
 
 The project requires a Unix-like environment. If you are using Windows, there are various ways of setting one up (WSL, a Linux virtual machine, Cygwin, MSYS2). I recommend using WSL, which is the [easiest to setup](https://learn.microsoft.com/en-us/windows/wsl/install).
 
-For Part 11, you need the following tools:
+You need the following tools:
 
 * `scons`
 * `nasm`
@@ -45,7 +45,7 @@ For Part 11, you need the following tools:
 * `bochs-x bochsbios vgabios` for debugging
 * your preferred text editor
 
-A major change in Part 11 was the move from `make` to `scons`. Most of the build scripts are now written in Python. Check the "Building" section if you are coming from Part 10, there are some new dependencies.
+A major change in Part 11 was the move from `make` to `scons`. Most of the build scripts are now written in Python. 
 
 ## Building
 
